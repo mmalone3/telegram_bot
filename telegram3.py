@@ -5,12 +5,14 @@ import os
 import schedule
 import time
 from collections import deque
-from moviepy.editor import AudioFileClip
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
 from sklearn.decomposition import LatentDirichletAllocation
 from sklearn.feature_extraction.text import CountVectorizer
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
+import speech_recognition as sr
+from pydub import AudioSegment
+import tempfile
 
 # Load API keys
 with open('api_key.txt', 'r') as f:
@@ -125,22 +127,6 @@ def periodic_retraining():
 
 schedule.every().day.at("00:00").do(periodic_retraining)
 
-async def voice_message(update: Update, context):
-    audio_file = await update.message.voice.get_file()
-    await audio_file.download('audio.mp3')
-    audio_clip = AudioFileClip('audio.mp3')
-    transcript = recognize_speech(audio_clip)
-    messages = [
-        {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": transcript}
-    ]
-    response = await client.chat.completions.create(model="gpt-3.5-turbo", messages=messages)
-    await update.message.reply_text(response.choices[0].message.content)
-    await add_to_conversation_history(transcript, response.choices[0].message.content)
-
-def recognize_speech(audio_clip):
-    return "Transcribed text from audio"
-
 async def train_model(update: Update, context):
     await update.message.reply_text("Model training started.")
     # Call OpenAI's API to retrain the model
@@ -151,6 +137,52 @@ async def save_conversation(update: Update, context):
 
 async def error(update: Update, context):
     logger.warning('Update "%s" caused error "%s"', update, context.error)
+
+
+async def voice_message(update: Update, context):
+    try:
+        audio_file = await update.message.voice.get_file()
+        
+        # Download the audio file
+        temp_dir = tempfile.mkdtemp()
+        ogg_path = os.path.join(temp_dir, 'input.ogg')
+        wav_path = os.path.join(temp_dir, 'output.wav')
+        
+        await audio_file.download_to_drive(ogg_path)
+        
+        # Try to convert OGG to WAV using pydub
+        try:
+            sound = AudioSegment.from_ogg(ogg_path)
+            sound.export(wav_path, format="wav")
+        except Exception as e:
+            logger.error(f"Failed to convert OGG to WAV: {e}")
+            await update.message.reply_text("Sorry, I couldn't process your voice message due to a technical issue.")
+            return
+        
+        # Recognize speech
+        recognizer = sr.Recognizer()
+        with sr.AudioFile(wav_path) as source:
+            audio = recognizer.record(source)
+        
+        transcript = recognizer.recognize_google(audio)
+        
+        # Clean up temporary files
+        os.remove(ogg_path)
+        os.remove(wav_path)
+        os.rmdir(temp_dir)
+        
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": transcript}
+        ]
+        
+        response = await client.chat.completions.create(model="gpt-3.5-turbo", messages=messages)
+        await update.message.reply_text(response.choices[0].message.content)
+        await add_to_conversation_history(transcript, response.choices[0].message.content)
+    
+    except Exception as e:
+        logger.error(f"Error processing voice message: {e}")
+        await update.message.reply_text("Sorry, I couldn't understand your voice message.")
 
 application.add_handler(MessageHandler(filters.VOICE, voice_message))
 
